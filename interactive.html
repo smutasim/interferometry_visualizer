@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Interferometric Image Simulator</title>
+<style>
+  body {
+    font-family: sans-serif;
+    background: #111;
+    color: #ddd;
+    text-align: center;
+    margin: 0;
+    padding: 1em;
+  }
+  canvas {
+    background: black;
+    margin: 10px;
+    border: 1px solid #444;
+    image-rendering: pixelated;
+  }
+  .controls {
+    margin: 15px auto;
+    max-width: 600px;
+  }
+  label {
+    display: block;
+    margin: 12px 0 4px;
+  }
+  input[type=range] {
+    width: 100%;
+  }
+</style>
+</head>
+<body>
+<h1>Interferometric Image Simulator (Earth)</h1>
+<canvas id="trueCanvas" width="540" height="540" aria-label="Original Earth Image"></canvas>
+<canvas id="obsCanvas" width="540" height="540" aria-label="Observed Image"></canvas>
+<div id="resolutionDisplay" style="color:#ddd; margin-top:10px; font-family: monospace;"></div>
+
+<div class="controls">
+  <label for="baseline">Baseline (m): <span id="baselineVal">50</span></label>
+  <input id="baseline" type="range" min="1" max="200" value="50" />
+
+  <label for="wavelength">Wavelength (μm): <span id="wavelengthVal">2.0</span></label>
+  <input id="wavelength" type="range" min="0.5" max="20" step="0.1" value="2" />
+
+  <label for="distance">Distance (AU): <span id="distanceVal">1</span></label>
+  <input id="distance" type="range" min="1" max="50" value="1" />
+</div>
+
+<script>
+(() => {
+  const earthRadiusMeters = 6.371e6;
+  const AUtoMeters = 1.496e11;
+  const canvasSize = 540;
+
+  const earthImg = new Image();
+  earthImg.crossOrigin = 'anonymous';
+  earthImg.src = 'img/earth.jpg';
+
+  const trueCanvas = document.getElementById('trueCanvas');
+  const obsCanvas = document.getElementById('obsCanvas');
+  const tctx = trueCanvas.getContext('2d');
+  const octx = obsCanvas.getContext('2d');
+
+  const baselineSlider = document.getElementById('baseline');
+  const wavelengthSlider = document.getElementById('wavelength');
+  const distanceSlider = document.getElementById('distance');
+
+  const baselineVal = document.getElementById('baselineVal');
+  const wavelengthVal = document.getElementById('wavelengthVal');
+  const distanceVal = document.getElementById('distanceVal');
+
+  earthImg.onload = () => {
+    drawTrueImage();
+    updateObservation();
+  };
+
+  function drawTrueImage() {
+    tctx.clearRect(0, 0, trueCanvas.width, trueCanvas.height);
+    tctx.drawImage(earthImg, 0, 0, trueCanvas.width, trueCanvas.height);
+  }
+
+  function updateObservation() {
+    baselineVal.textContent = baselineSlider.value;
+    wavelengthVal.textContent = wavelengthSlider.value;
+    distanceVal.textContent = distanceSlider.value;
+
+    const baseline = parseFloat(baselineSlider.value);
+    const wavelength = parseFloat(wavelengthSlider.value) * 1e-6; // μm → m
+    const distance = parseFloat(distanceSlider.value) * AUtoMeters;
+
+    const angularDiameterRad = 2 * earthRadiusMeters / distance;
+    const masPerRad = (180 / Math.PI) * 3600 * 1000;
+    const angularDiameterMas = angularDiameterRad * masPerRad;
+
+    const pixScaleMas = angularDiameterMas / canvasSize;
+
+    const resRad = wavelength / baseline;
+    const resMas = resRad * masPerRad;
+
+    let sigmaPix = resMas / (pixScaleMas * 2.355);
+    if (!isFinite(sigmaPix) || sigmaPix < 0.1) sigmaPix = 0.1;
+    if (sigmaPix > 100) sigmaPix = 100;
+
+    const imgData = tctx.getImageData(0, 0, trueCanvas.width, trueCanvas.height);
+    const blurred = gaussianBlur(imgData, sigmaPix);
+    octx.putImageData(blurred, 0, 0);
+
+    // Display angular resolution
+    const resolutionDiv = document.getElementById('resolutionDisplay');
+    resolutionDiv.textContent = `Angular Resolution: ${resMas.toFixed(3)} mas`;
+  }
+
+  function gaussianBlur(imgData, sigma) {
+    if (sigma < 0.5) return imgData;
+
+    const {width, height, data} = imgData;
+    const tmp = new Uint8ClampedArray(data);
+
+    const kernelRadius = Math.ceil(sigma * 3);
+    const kernelSize = kernelRadius * 2 + 1;
+
+    const kernel = new Float32Array(kernelSize);
+    const sigma2 = sigma * sigma;
+    let sum = 0;
+    for (let i = 0; i < kernelSize; i++) {
+      const x = i - kernelRadius;
+      kernel[i] = Math.exp(-(x * x) / (2 * sigma2));
+      sum += kernel[i];
+    }
+    for (let i = 0; i < kernelSize; i++) kernel[i] /= sum;
+
+    // Horizontal blur
+    const horizBlur = new Uint8ClampedArray(data.length);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        for (let c = 0; c < 4; c++) {
+          let acc = 0;
+          for (let k = -kernelRadius; k <= kernelRadius; k++) {
+            let xx = x + k;
+            if (xx < 0) xx = 0;
+            else if (xx >= width) xx = width - 1;
+            acc += tmp[(y * width + xx) * 4 + c] * kernel[k + kernelRadius];
+          }
+          horizBlur[(y * width + x) * 4 + c] = acc;
+        }
+      }
+    }
+
+    // Vertical blur
+    const out = new Uint8ClampedArray(data.length);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        for (let c = 0; c < 4; c++) {
+          let acc = 0;
+          for (let k = -kernelRadius; k <= kernelRadius; k++) {
+            let yy = y + k;
+            if (yy < 0) yy = 0;
+            else if (yy >= height) yy = height - 1;
+            acc += horizBlur[(yy * width + x) * 4 + c] * kernel[k + kernelRadius];
+          }
+          out[(y * width + x) * 4 + c] = acc;
+        }
+      }
+    }
+
+    return new ImageData(out, width, height);
+  }
+
+  baselineSlider.addEventListener('input', updateObservation);
+  wavelengthSlider.addEventListener('input', updateObservation);
+  distanceSlider.addEventListener('input', updateObservation);
+})();
+</script>
+</body>
+</html>
